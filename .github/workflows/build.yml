@@ -1,0 +1,39 @@
+name: Build Jagoomba Color
+
+on:
+  push:
+    branches:
+      - master
+      - feature/fullscreen-stretch
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITARM: /opt/devkitpro/devkitARM
+      LIBGBA: /opt/devkitpro/libgba
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: make -j2
+
+      - name: Show binary information
+        run: |
+          ls -l jagoombacolor.gba jagoombacolor.elf
+          sha256sum jagoombacolor.gba
+
+      - name: Upload emulator binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: jagoombacolor-fullscreen
+          path: |
+            jagoombacolor.gba
+            jagoombacolor.elf
+            jagoombacolor.elf.map
+          if-no-files-found: error
