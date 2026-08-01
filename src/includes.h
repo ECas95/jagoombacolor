@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <gba_dma.h>
 #include "gba.h"
 
 #include "asmcalls.h"
