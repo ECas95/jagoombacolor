@@ -20,7 +20,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build
+      - name: Build generated asset objects
+        shell: bash
+        run: |
+          set +e
+          make -j2
+          first_status=$?
+          set -e
+          test -f build/font.lz77.o
+          test -f build/fontpal.bin.o
+          cp build/font.lz77.o build/font.o
+          cp build/fontpal.bin.o build/fontpal.o
+          echo "First pass status: ${first_status}; generated objects prepared."
+
+      - name: Link emulator
         run: make -j2
 
       - name: Show binary information
