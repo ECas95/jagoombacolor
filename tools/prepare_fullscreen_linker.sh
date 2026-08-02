@@ -4,13 +4,15 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 source_ld="$repo_root/src/gba_cart_my.ld"
 target_ld="$repo_root/src/gba_cart_fullscreen.ld"
+lcd_source="$repo_root/src/lcd.s"
 
-python3 - "$source_ld" "$target_ld" <<'PY'
+python3 - "$source_ld" "$target_ld" "$lcd_source" <<'PY'
 from pathlib import Path
 import sys
 
 source = Path(sys.argv[1])
 target = Path(sys.argv[2])
+lcd_source = Path(sys.argv[3])
 text = source.read_text(encoding="utf-8")
 
 old_ewram = "\tewram\t: ORIGIN = 0x02000000, LENGTH = 256K"
@@ -30,8 +32,16 @@ text = text.replace(
     "* vram1 section relocated to reserved high EWRAM for fullscreen Mode 4",
     1,
 )
-
 target.write_text(text, encoding="utf-8")
+
+lcd = lcd_source.read_text(encoding="utf-8")
+old_call = "\t@ensure that GBA vblank is enabled when this function exits\n\tbl reenable_gba_vblank\n"
+new_call = "\t@ensure that GBA vblank is enabled when this function exits\n\tbl_long reenable_gba_vblank\n"
+if old_call in lcd:
+    lcd = lcd.replace(old_call, new_call, 1)
+elif new_call not in lcd:
+    raise SystemExit("Could not locate the relocated .vram1 far call")
+lcd_source.write_text(lcd, encoding="utf-8")
 PY
 
-echo "Generated $target_ld"
+echo "Generated $target_ld and patched relocated far calls"
