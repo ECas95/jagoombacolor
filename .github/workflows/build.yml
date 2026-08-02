@@ -47,35 +47,51 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          section_addr="$(arm-none-eabi-readelf -S jagoombacolor.elf | awk '$2 == ".vram1" {print $4}')"
+          READELF="$DEVKITARM/bin/arm-none-eabi-readelf"
+          NM="$DEVKITARM/bin/arm-none-eabi-nm"
+          OBJDUMP="$DEVKITARM/bin/arm-none-eabi-objdump"
+
+          section_addr="$($READELF -W -S jagoombacolor.elf | awk '$3 == ".vram1" {print $5}')"
           test "$section_addr" = "0203f000"
 
-          frame_addr="$(arm-none-eabi-nm -n jagoombacolor.elf | awk '$3 == "fullscreen_frame" {print $1}')"
+          frame_addr="$($NM -n jagoombacolor.elf | awk '$3 == "fullscreen_frame" {print $1}')"
           test -n "$frame_addr"
 
-          if arm-none-eabi-readelf -S jagoombacolor.elf | awk '
-              /AX/ {
-                  addr = strtonum("0x" $4);
-                  size = strtonum("0x" $6);
-                  if (addr < 0x06014000 && addr + size > 0x0600A000) {
-                      print;
-                      bad = 1;
-                  }
-              }
-              END { exit bad }
-          '; then
-            echo "No executable section overlaps Mode 4 page 1."
-          else
-            echo "Executable code overlaps Mode 4 page 1." >&2
-            exit 1
-          fi
+          $OBJDUMP -h jagoombacolor.elf > section-map.txt
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lines = Path("section-map.txt").read_text(encoding="utf-8").splitlines()
+          sections = []
+          for index, line in enumerate(lines):
+              fields = line.split()
+              if len(fields) < 7 or not fields[0].isdigit():
+                  continue
+              name = fields[1]
+              size = int(fields[2], 16)
+              vma = int(fields[3], 16)
+              flags = lines[index + 1] if index + 1 < len(lines) else ""
+              if "CODE" in flags:
+                  sections.append((name, vma, size))
+
+          framebuffer_start = 0x0600A000
+          framebuffer_end = 0x06014000
+          overlaps = [
+              (name, address, size)
+              for name, address, size in sections
+              if address < framebuffer_end and address + size > framebuffer_start
+          ]
+          if overlaps:
+              raise SystemExit(f"Executable code overlaps Mode 4 page 1: {overlaps}")
+          print("No executable section overlaps Mode 4 page 1.")
+          PY
 
       - name: Show binary information
         run: |
           ls -l jagoombacolor.gba jagoombacolor.elf
           sha256sum jagoombacolor.gba
-          arm-none-eabi-readelf -S jagoombacolor.elf | grep -E '\.vram1|\.sbss|\.ewram'
-          arm-none-eabi-nm -n jagoombacolor.elf | grep -E 'fullscreen_frame|newframe_vblank|fullscreen_original_newframe_vblank'
+          "$DEVKITARM/bin/arm-none-eabi-readelf" -W -S jagoombacolor.elf | grep -E '\.vram1|\.sbss|\.ewram'
+          "$DEVKITARM/bin/arm-none-eabi-nm" -n jagoombacolor.elf | grep -E 'fullscreen_frame|newframe_vblank|fullscreen_original_newframe_vblank'
 
       - name: Upload emulator binary
         uses: actions/upload-artifact@v4
@@ -86,4 +102,5 @@ jobs:
             jagoombacolor.elf
             jagoombacolor.elf.map
             src/gba_cart_fullscreen.ld
+            section-map.txt
           if-no-files-found: error
