@@ -24,8 +24,8 @@ jobs:
         shell: bash
         run: |
           bash tools/prepare_fullscreen_linker.sh
-          grep -F $'ewram\t: ORIGIN = 0x02000000, LENGTH = 252K' src/gba_cart_fullscreen.ld
-          grep -F $'vram1   : ORIGIN = 0x0203F000, LENGTH = 4096' src/gba_cart_fullscreen.ld
+          grep -F $'ewram\t: ORIGIN = 0x02000000, LENGTH = 256K' src/gba_cart_fullscreen.ld
+          grep -F $'vram1   : ORIGIN = 0x06013600, LENGTH = 2560' src/gba_cart_fullscreen.ld
 
       - name: Build generated asset objects
         shell: bash
@@ -71,27 +71,37 @@ jobs:
           if ".vram1" not in sections:
               raise SystemExit("Missing .vram1 section")
 
-          relocated = sections[".vram1"]
-          if relocated["vma"] != 0x0203F000:
+          vram1 = sections[".vram1"]
+          if vram1["vma"] != 0x06013600:
               raise SystemExit(
-                  f".vram1 has unexpected VMA 0x{relocated['vma']:08X}"
+                  f".vram1 has unexpected VMA 0x{vram1['vma']:08X}"
               )
-          if "CODE" not in relocated["flags"]:
+          if "CODE" not in vram1["flags"]:
               raise SystemExit(".vram1 is not marked executable")
-          if relocated["size"] > 0x1000:
+          if vram1["size"] > 0x0A00:
               raise SystemExit(
-                  f".vram1 exceeds reserved EWRAM block: 0x{relocated['size']:X}"
+                  f".vram1 exceeds the non-visible page-1 tail: 0x{vram1['size']:X}"
               )
 
-          framebuffer_start = 0x0600A000
-          framebuffer_end = 0x06014000
+          visible_start = 0x0600A000
+          visible_end = 0x06013600
+          page1_end = 0x06014000
+
+          vram1_start = vram1["vma"]
+          vram1_end = vram1_start + vram1["size"]
+          if vram1_start < visible_end or vram1_end > page1_end:
+              raise SystemExit(
+                  ".vram1 is outside the safe non-visible page-1 tail: "
+                  f"0x{vram1_start:08X}-0x{vram1_end:08X}"
+              )
+
           overlaps = []
           for name, section in sections.items():
               if "CODE" not in section["flags"]:
                   continue
               start = section["vma"]
               end = start + section["size"]
-              if start < framebuffer_end and end > framebuffer_start:
+              if start < visible_end and end > visible_start:
                   overlaps.append((name, start, section["size"]))
 
           if overlaps:
@@ -100,7 +110,8 @@ jobs:
                   for name, start, size in overlaps
               )
               raise SystemExit(
-                  "Executable code overlaps Mode 4 page 1: " + formatted
+                  "Executable code overlaps the visible Mode 4 page-1 framebuffer: "
+                  + formatted
               )
 
           symbols = {}
@@ -123,17 +134,17 @@ jobs:
               raise SystemExit("Missing required symbols: " + ", ".join(missing))
 
           frame = symbols["fullscreen_frame"]
-          if not (0x02000000 <= frame < 0x0203F000):
+          if not (0x02000000 <= frame < 0x02040000):
               raise SystemExit(
-                  f"fullscreen_frame outside normal EWRAM: 0x{frame:08X}"
+                  f"fullscreen_frame outside EWRAM: 0x{frame:08X}"
               )
 
           print(
-              f".vram1 relocated to 0x{relocated['vma']:08X}, "
-              f"size 0x{relocated['size']:X}"
+              f".vram1 at 0x{vram1_start:08X}-0x{vram1_end:08X}, "
+              "after the visible Mode 4 framebuffer"
           )
           print(f"fullscreen_frame at 0x{frame:08X}")
-          print("No executable section overlaps Mode 4 page 1.")
+          print("No executable section overlaps visible Mode 4 pixels.")
           PY
 
       - name: Show binary information
