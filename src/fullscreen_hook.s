@@ -1,7 +1,7 @@
 @ Fullscreen renderer interworking hooks.
 @
 @ lcd.s is preprocessed with vblankinterrupt and newframe_vblank renamed to
-@ private originals.  timeout.s still calls the public newframe_vblank wrapper
+@ private originals. timeout.s still calls the public newframe_vblank wrapper
 @ below, giving the fullscreen compositor one deterministic call per emulated
 @ Game Boy frame.
 
@@ -13,8 +13,8 @@
 
 	global_func vblankinterrupt
 vblankinterrupt:
-	@ Preserve the complete interrupted context. The original handler uses the
-	@ emulator's register conventions and the fullscreen helpers are Thumb C.
+	@ Preserve the complete interrupted context. Fourteen registers keep the
+	@ IRQ stack 8-byte aligned while the wrapper calls Thumb C helpers.
 	stmfd sp!,{r0-r12,lr}
 
 	blx_long fullscreen_gate_refresh
@@ -27,20 +27,22 @@ vblankinterrupt:
 
 	global_func newframe_vblank
 newframe_vblank:
-	@ Preserve the return address expected by timeout.s, run the stock emulated
-	@ frame-boundary work, then compose a complete 160x144 frame in one pass.
-	stmfd sp!,{lr}
+	@ Save two registers, not LR alone. The former one-word push misaligned the
+	@ stack for every C call made by the stock newframe routine.
+	stmfd sp!,{r12,lr}
 	bl fullscreen_original_newframe_vblank
+
+	@ Compose a complete native frame after the stock frame-boundary bookkeeping.
 	stmfd sp!,{r0-r12,lr}
 	blx_long fullscreen_compose_frame_now
 	ldmfd sp!,{r0-r12,lr}
-	ldmfd sp!,{pc}
+
+	ldmfd sp!,{r12,pc}
 
 	global_func fullscreen_scanline_hook
 fullscreen_scanline_hook:
-	@ V5 no longer composes through the scanline pointer. Keep this hook timing-
-	@ transparent because fullscreen_vblank_post may still install it while the
-	@ backend is active.
+	@ V5+ does not compose through the per-scanline pointer. Preserve the stock
+	@ timing, IRQ and HDMA path unchanged.
 	b default_scanlinehook
 
 	.align
