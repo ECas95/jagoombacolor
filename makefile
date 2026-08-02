@@ -7,3 +7,10 @@ include $(ROOT_MAKEFILE_DIR)Makefile
 # intentionally overlays stateheader/configdata storage, so preserve that build
 # behaviour while the relevant assignment remains unchanged.
 CFLAGS += -Wno-error=incompatible-pointer-types
+
+# Route standalone frontend and in-game menu transitions through the fullscreen
+# gate. Calls from main.c are wrapped at link time; the ui() wrapper covers the
+# internal L+R menu whose visibility helpers are in the same translation unit.
+LDFLAGS += -Wl,--wrap=make_ui_visible \
+           -Wl,--wrap=make_ui_invisible \
+           -Wl,--wrap=ui
