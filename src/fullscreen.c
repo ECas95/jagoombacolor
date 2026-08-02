@@ -3,13 +3,9 @@
 /*
  * Fullscreen stretch backend for Jagoomba Color.
  *
- * The stock renderer uses a centred 160x144 Mode 0 presentation.  This backend
+ * The stock renderer uses a centred 160x144 Mode 0 presentation. This backend
  * composes a native 160x144 indexed frame from GB VRAM/OAM, uploads it to the
  * hidden Mode 4 page, and lets the GBA affine unit stretch it to 240x160.
- *
- * Important lifecycle rule: fullscreen is enabled only when the stock UI is
- * actually hidden.  The previous ui_x heuristic could activate from inside
- * loadcart()/menu transitions and display partially initialized state.
  */
 
 #define FS_SOURCE_WIDTH       160
@@ -45,10 +41,6 @@
 #define FS_DISPCNT_PAGE1      0x0010
 #define FS_DISPCNT_BG2        0x0400
 
-/* 8.8 destination-to-source affine steps.
- * 171 maps destination X 0..239 to source X 0..159.
- * 231 maps destination Y 0..159 to source Y 0..143.
- */
 #define FS_AFFINE_PA          171
 #define FS_AFFINE_PD          231
 
@@ -57,7 +49,6 @@
 
 extern volatile u8 lcdstate[];
 extern volatile u8 g_scanline;
-extern volatile u8 ui_border_visible;
 extern void (* volatile _scanlinehook)(void);
 extern void fullscreen_scanline_hook(void);
 extern void default_scanlinehook(void);
@@ -85,7 +76,6 @@ static inline const u8 *fullscreen_vram(void)
 
 static inline int fullscreen_wanted(void)
 {
-    /* Bit 0 is set by make_ui_visible() and cleared by make_ui_invisible(). */
     return romstart != 0 && !(ui_border_visible & 1);
 }
 
@@ -258,7 +248,6 @@ static void fullscreen_sort_dmg_sprites(const u8 *oam, u8 *selected, int count)
     int i;
     int j;
 
-    /* Low priority first: larger X, then larger OAM index. */
     for (i = 0; i < count - 1; ++i) {
         for (j = i + 1; j < count; ++j) {
             if (!fullscreen_sprite_is_lower_priority(oam, selected[i], selected[j])) {
@@ -334,7 +323,6 @@ static void fullscreen_draw_sprite(
             }
         }
 
-        /* OBJ palettes are mirrored into BG palette banks 0-7 in Mode 4. */
         destination[destination_x] = (u8)((palette << 4) | color);
     }
 }
@@ -355,7 +343,6 @@ static void fullscreen_render_sprites(
         return;
     }
 
-    /* The GB PPU selects only the first ten OAM entries touching a scanline. */
     for (sprite_index = 0; sprite_index < 40 && selected_count < 10; ++sprite_index) {
         int raw_y = oam[sprite_index * 4];
         int sprite_y;
@@ -372,7 +359,6 @@ static void fullscreen_render_sprites(
     }
 
     if (gbc_mode) {
-        /* CGB overlap priority is lower OAM index; draw higher indices first. */
         int i;
         for (i = selected_count - 1; i >= 0; --i) {
             fullscreen_draw_sprite(
@@ -422,8 +408,6 @@ void fullscreen_scanline_render(void)
         fullscreen_render_phase ^= 1;
     }
 
-    /* Render at 30 fps.  The emulator timing remains at the original rate and
-       the most recent complete fullscreen frame stays visible between updates. */
     if (!fullscreen_render_this_frame) {
         return;
     }
@@ -447,8 +431,6 @@ static void fullscreen_upload_frame(void)
 {
     int y;
 
-    /* Mode 4 always has a 240-byte stride.  Upload only the 160 source pixels
-       used by the affine transform, saving roughly 40 percent of DMA traffic. */
     for (y = 0; y < FS_SOURCE_HEIGHT; ++y) {
         const void *source = fullscreen_frame + (y * FS_SOURCE_WIDTH);
         void *destination = (void *)(FS_MODE4_PAGE1 + (y * FS_DEST_WIDTH));
@@ -501,7 +483,6 @@ static void fullscreen_exit(void)
 
     fullscreen_restore_bg_palette();
 
-    /* The stock VCOUNT-driven Mode 0 renderer resumes in the same VBlank. */
     FS_REG_IE |= FS_IRQ_VCOUNT;
     FS_REG_DISPSTAT |= FS_DISPSTAT_VCOUNT;
     FS_REG_DISPCNT = 0;
@@ -524,12 +505,10 @@ void fullscreen_vblank_post(void)
         fullscreen_enter();
     }
 
-    /* loadcart() can restore the stock hook, so enforce ours at frame borders. */
     if (_scanlinehook != fullscreen_scanline_hook) {
         _scanlinehook = fullscreen_scanline_hook;
     }
 
-    /* Do not expose Mode 4 until one complete source frame exists. */
     if (fullscreen_frame_ready) {
         fullscreen_upload_frame();
         fullscreen_frame_ready = 0;
@@ -540,7 +519,6 @@ void fullscreen_vblank_post(void)
         return;
     }
 
-    /* Stop the stock scanline output after it has completed bookkeeping. */
     FS_REG_DMA0CNT_H = 0;
     FS_REG_DMA1CNT_H = 0;
     FS_REG_IE &= (u16)~(FS_IRQ_HBLANK | FS_IRQ_VCOUNT);
