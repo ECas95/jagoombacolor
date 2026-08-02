@@ -11,7 +11,17 @@
 	#include "memory.s"
 	#include "cart.s"
 	#include "mappers.s"
+
+@ Keep the original hardware VBlank and emulated-frame renderer available
+@ behind wrappers. timeout.s was included before these aliases, so its call to
+@ newframe_vblank resolves to the public wrapper in fullscreen_hook.s.
+	#define vblankinterrupt fullscreen_original_vblankinterrupt
+	#define newframe_vblank fullscreen_original_newframe_vblank
 	#include "lcd.s"
+	#undef newframe_vblank
+	#undef vblankinterrupt
+	#include "fullscreen_hook.s"
+
 	#include "io.s"
 	#include "sound.s"
 	#include "sgb.s"

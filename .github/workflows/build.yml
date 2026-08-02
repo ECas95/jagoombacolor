@@ -1,0 +1,172 @@
+name: Build Jagoomba Color
+
+on:
+  push:
+    branches:
+      - master
+      - feature/fullscreen-stretch
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITARM: /opt/devkitpro/devkitARM
+      LIBGBA: /opt/devkitpro/libgba
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare page-0 fullscreen build
+        shell: bash
+        run: |
+          bash tools/prepare_fullscreen_linker.sh
+          python3 tools/prepare_fullscreen_page0.py
+          grep -F $'ewram\t: ORIGIN = 0x02000000, LENGTH = 256K' src/gba_cart_fullscreen.ld
+          grep -F $'vram1   : ORIGIN = 0x0600F000, LENGTH = 3584' src/gba_cart_fullscreen.ld
+          grep -F '#define FS_MODE4_PAGE0        ((volatile u8 *)0x06000000)' src/fullscreen.c
+          grep -F '#define FS_DISPCNT_PAGE1      0x0000' src/fullscreen.c
+
+      - name: Build generated asset objects
+        shell: bash
+        run: |
+          set +e
+          make -j2
+          first_status=$?
+          set -e
+          test -f build/font.lz77.o
+          test -f build/fontpal.bin.o
+          cp build/font.lz77.o build/font.o
+          cp build/fontpal.bin.o build/fontpal.o
+          echo "First pass status: ${first_status}; generated objects prepared."
+
+      - name: Link emulator
+        run: make -j2
+
+      - name: Validate page-0 memory map
+        shell: bash
+        run: |
+          set -euo pipefail
+          NM="$DEVKITARM/bin/arm-none-eabi-nm"
+          OBJDUMP="$DEVKITARM/bin/arm-none-eabi-objdump"
+
+          "$OBJDUMP" -h jagoombacolor.elf > section-map.txt
+          "$NM" -n jagoombacolor.elf > symbols.txt
+          "$OBJDUMP" -d jagoombacolor.elf > disassembly.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lines = Path("section-map.txt").read_text(encoding="utf-8").splitlines()
+          sections = {}
+          for index, line in enumerate(lines):
+              fields = line.split()
+              if len(fields) < 7 or not fields[0].isdigit():
+                  continue
+              name = fields[1]
+              size = int(fields[2], 16)
+              vma = int(fields[3], 16)
+              flags = lines[index + 1].strip() if index + 1 < len(lines) else ""
+              sections[name] = {"vma": vma, "size": size, "flags": flags}
+
+          if ".vram1" not in sections:
+              raise SystemExit("Missing .vram1 section")
+
+          vram1 = sections[".vram1"]
+          if vram1["vma"] != 0x0600F000:
+              raise SystemExit(
+                  f".vram1 moved from original VMA: 0x{vram1['vma']:08X}"
+              )
+          if "CODE" not in vram1["flags"]:
+              raise SystemExit(".vram1 is not executable")
+          if vram1["size"] > 0x0E00:
+              raise SystemExit(f".vram1 exceeds original allocation: 0x{vram1['size']:X}")
+
+          visible_start = 0x06000000
+          visible_end = 0x06009600
+          upload_end = visible_start + ((144 - 1) * 240) + 160
+
+          if upload_end > visible_end:
+              raise SystemExit(
+                  f"Fullscreen upload exceeds visible page 0: 0x{upload_end:08X}"
+              )
+          if upload_end > vram1["vma"]:
+              raise SystemExit(
+                  f"Fullscreen upload reaches .vram1: 0x{upload_end:08X}"
+              )
+
+          overlaps = []
+          for name, section in sections.items():
+              if "CODE" not in section["flags"]:
+                  continue
+              start = section["vma"]
+              end = start + section["size"]
+              if start < visible_end and end > visible_start:
+                  overlaps.append((name, start, section["size"]))
+
+          if overlaps:
+              formatted = ", ".join(
+                  f"{name}@0x{start:08X}+0x{size:X}"
+                  for name, start, size in overlaps
+              )
+              raise SystemExit(
+                  "Executable code overlaps visible Mode 4 page 0: " + formatted
+              )
+
+          symbols = {}
+          for line in Path("symbols.txt").read_text(encoding="utf-8").splitlines():
+              fields = line.split()
+              if len(fields) >= 3:
+                  try:
+                      symbols[fields[-1]] = int(fields[0], 16)
+                  except ValueError:
+                      pass
+
+          required = (
+              "fullscreen_frame",
+              "newframe_vblank",
+              "fullscreen_original_newframe_vblank",
+              "fullscreen_vblank_post",
+          )
+          missing = [name for name in required if name not in symbols]
+          if missing:
+              raise SystemExit("Missing required symbols: " + ", ".join(missing))
+
+          frame = symbols["fullscreen_frame"]
+          if not (0x02000000 <= frame < 0x02040000):
+              raise SystemExit(f"fullscreen_frame outside EWRAM: 0x{frame:08X}")
+
+          print(
+              f".vram1 preserved at 0x{vram1['vma']:08X}, size 0x{vram1['size']:X}"
+          )
+          print(
+              f"Mode 4 page-0 upload ends at 0x{upload_end:08X}; "
+              f"gap to .vram1 is 0x{vram1['vma'] - upload_end:X}"
+          )
+          print("No executable section overlaps visible page 0.")
+          PY
+
+      - name: Show binary information
+        run: |
+          ls -l jagoombacolor.gba jagoombacolor.elf
+          sha256sum jagoombacolor.gba
+          cat section-map.txt
+          "$DEVKITARM/bin/arm-none-eabi-nm" -n jagoombacolor.elf | grep -E 'fullscreen_frame|newframe_vblank|fullscreen_original_newframe_vblank|fullscreen_vblank_post'
+
+      - name: Upload emulator binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: jagoombacolor-fullscreen
+          path: |
+            jagoombacolor.gba
+            jagoombacolor.elf
+            jagoombacolor.elf.map
+            src/gba_cart_fullscreen.ld
+            src/fullscreen.c
+            section-map.txt
+            symbols.txt
+            disassembly.txt
+          if-no-files-found: error
