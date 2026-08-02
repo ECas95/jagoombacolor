@@ -20,12 +20,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare fullscreen-safe linker layout
+      - name: Prepare page-0 fullscreen build
         shell: bash
         run: |
           bash tools/prepare_fullscreen_linker.sh
+          python3 tools/prepare_fullscreen_page0.py
           grep -F $'ewram\t: ORIGIN = 0x02000000, LENGTH = 256K' src/gba_cart_fullscreen.ld
-          grep -F $'vram1   : ORIGIN = 0x06013600, LENGTH = 2560' src/gba_cart_fullscreen.ld
+          grep -F $'vram1   : ORIGIN = 0x0600F000, LENGTH = 3584' src/gba_cart_fullscreen.ld
+          grep -F '#define FS_MODE4_PAGE0        ((volatile u8 *)0x06000000)' src/fullscreen.c
+          grep -F '#define FS_DISPCNT_PAGE1      0x0000' src/fullscreen.c
 
       - name: Build generated asset objects
         shell: bash
@@ -43,7 +46,7 @@ jobs:
       - name: Link emulator
         run: make -j2
 
-      - name: Validate fullscreen memory map
+      - name: Validate page-0 memory map
         shell: bash
         run: |
           set -euo pipefail
@@ -52,6 +55,7 @@ jobs:
 
           "$OBJDUMP" -h jagoombacolor.elf > section-map.txt
           "$NM" -n jagoombacolor.elf > symbols.txt
+          "$OBJDUMP" -d jagoombacolor.elf > disassembly.txt
 
           python3 - <<'PY'
           from pathlib import Path
@@ -72,27 +76,26 @@ jobs:
               raise SystemExit("Missing .vram1 section")
 
           vram1 = sections[".vram1"]
-          if vram1["vma"] != 0x06013600:
+          if vram1["vma"] != 0x0600F000:
               raise SystemExit(
-                  f".vram1 has unexpected VMA 0x{vram1['vma']:08X}"
+                  f".vram1 moved from original VMA: 0x{vram1['vma']:08X}"
               )
           if "CODE" not in vram1["flags"]:
-              raise SystemExit(".vram1 is not marked executable")
-          if vram1["size"] > 0x0A00:
+              raise SystemExit(".vram1 is not executable")
+          if vram1["size"] > 0x0E00:
+              raise SystemExit(f".vram1 exceeds original allocation: 0x{vram1['size']:X}")
+
+          visible_start = 0x06000000
+          visible_end = 0x06009600
+          upload_end = visible_start + ((144 - 1) * 240) + 160
+
+          if upload_end > visible_end:
               raise SystemExit(
-                  f".vram1 exceeds the non-visible page-1 tail: 0x{vram1['size']:X}"
+                  f"Fullscreen upload exceeds visible page 0: 0x{upload_end:08X}"
               )
-
-          visible_start = 0x0600A000
-          visible_end = 0x06013600
-          page1_end = 0x06014000
-
-          vram1_start = vram1["vma"]
-          vram1_end = vram1_start + vram1["size"]
-          if vram1_start < visible_end or vram1_end > page1_end:
+          if upload_end > vram1["vma"]:
               raise SystemExit(
-                  ".vram1 is outside the safe non-visible page-1 tail: "
-                  f"0x{vram1_start:08X}-0x{vram1_end:08X}"
+                  f"Fullscreen upload reaches .vram1: 0x{upload_end:08X}"
               )
 
           overlaps = []
@@ -110,8 +113,7 @@ jobs:
                   for name, start, size in overlaps
               )
               raise SystemExit(
-                  "Executable code overlaps the visible Mode 4 page-1 framebuffer: "
-                  + formatted
+                  "Executable code overlaps visible Mode 4 page 0: " + formatted
               )
 
           symbols = {}
@@ -119,15 +121,15 @@ jobs:
               fields = line.split()
               if len(fields) >= 3:
                   try:
-                      address = int(fields[0], 16)
+                      symbols[fields[-1]] = int(fields[0], 16)
                   except ValueError:
-                      continue
-                  symbols[fields[-1]] = address
+                      pass
 
           required = (
               "fullscreen_frame",
               "newframe_vblank",
               "fullscreen_original_newframe_vblank",
+              "fullscreen_vblank_post",
           )
           missing = [name for name in required if name not in symbols]
           if missing:
@@ -135,16 +137,16 @@ jobs:
 
           frame = symbols["fullscreen_frame"]
           if not (0x02000000 <= frame < 0x02040000):
-              raise SystemExit(
-                  f"fullscreen_frame outside EWRAM: 0x{frame:08X}"
-              )
+              raise SystemExit(f"fullscreen_frame outside EWRAM: 0x{frame:08X}")
 
           print(
-              f".vram1 at 0x{vram1_start:08X}-0x{vram1_end:08X}, "
-              "after the visible Mode 4 framebuffer"
+              f".vram1 preserved at 0x{vram1['vma']:08X}, size 0x{vram1['size']:X}"
           )
-          print(f"fullscreen_frame at 0x{frame:08X}")
-          print("No executable section overlaps visible Mode 4 pixels.")
+          print(
+              f"Mode 4 page-0 upload ends at 0x{upload_end:08X}; "
+              f"gap to .vram1 is 0x{vram1['vma'] - upload_end:X}"
+          )
+          print("No executable section overlaps visible page 0.")
           PY
 
       - name: Show binary information
@@ -152,7 +154,7 @@ jobs:
           ls -l jagoombacolor.gba jagoombacolor.elf
           sha256sum jagoombacolor.gba
           cat section-map.txt
-          "$DEVKITARM/bin/arm-none-eabi-nm" -n jagoombacolor.elf | grep -E 'fullscreen_frame|newframe_vblank|fullscreen_original_newframe_vblank'
+          "$DEVKITARM/bin/arm-none-eabi-nm" -n jagoombacolor.elf | grep -E 'fullscreen_frame|newframe_vblank|fullscreen_original_newframe_vblank|fullscreen_vblank_post'
 
       - name: Upload emulator binary
         uses: actions/upload-artifact@v4
@@ -163,6 +165,8 @@ jobs:
             jagoombacolor.elf
             jagoombacolor.elf.map
             src/gba_cart_fullscreen.ld
+            src/fullscreen.c
             section-map.txt
             symbols.txt
+            disassembly.txt
           if-no-files-found: error
