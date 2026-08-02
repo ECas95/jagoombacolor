@@ -20,6 +20,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare fullscreen-safe linker layout
+        shell: bash
+        run: |
+          bash tools/prepare_fullscreen_linker.sh
+          grep -F $'ewram\t: ORIGIN = 0x02000000, LENGTH = 252K' src/gba_cart_fullscreen.ld
+          grep -F $'vram1   : ORIGIN = 0x0203F000, LENGTH = 4096' src/gba_cart_fullscreen.ld
+
       - name: Build generated asset objects
         shell: bash
         run: |
@@ -36,10 +43,39 @@ jobs:
       - name: Link emulator
         run: make -j2
 
+      - name: Validate fullscreen memory map
+        shell: bash
+        run: |
+          set -euo pipefail
+          section_addr="$(arm-none-eabi-readelf -S jagoombacolor.elf | awk '$2 == ".vram1" {print $4}')"
+          test "$section_addr" = "0203f000"
+
+          frame_addr="$(arm-none-eabi-nm -n jagoombacolor.elf | awk '$3 == "fullscreen_frame" {print $1}')"
+          test -n "$frame_addr"
+
+          if arm-none-eabi-readelf -S jagoombacolor.elf | awk '
+              /AX/ {
+                  addr = strtonum("0x" $4);
+                  size = strtonum("0x" $6);
+                  if (addr < 0x06014000 && addr + size > 0x0600A000) {
+                      print;
+                      bad = 1;
+                  }
+              }
+              END { exit bad }
+          '; then
+            echo "No executable section overlaps Mode 4 page 1."
+          else
+            echo "Executable code overlaps Mode 4 page 1." >&2
+            exit 1
+          fi
+
       - name: Show binary information
         run: |
           ls -l jagoombacolor.gba jagoombacolor.elf
           sha256sum jagoombacolor.gba
+          arm-none-eabi-readelf -S jagoombacolor.elf | grep -E '\.vram1|\.sbss|\.ewram'
+          arm-none-eabi-nm -n jagoombacolor.elf | grep -E 'fullscreen_frame|newframe_vblank|fullscreen_original_newframe_vblank'
 
       - name: Upload emulator binary
         uses: actions/upload-artifact@v4
@@ -49,4 +85,5 @@ jobs:
             jagoombacolor.gba
             jagoombacolor.elf
             jagoombacolor.elf.map
+            src/gba_cart_fullscreen.ld
           if-no-files-found: error
