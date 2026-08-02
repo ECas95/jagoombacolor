@@ -54,7 +54,6 @@ replace_once(
     "#define FS_REG_DMA1CNT_H      FS_REG16(0x040000C6)\n"
     "#define FS_REG_IE             FS_REG16(0x04000200)",
     "#define FS_REG_DMA1CNT_H      FS_REG16(0x040000C6)\n"
-    "#define FS_REG_DMA2CNT_H      FS_REG16(0x040000D2)\n"
     "#define FS_REG_IE             FS_REG16(0x04000200)\n"
     "#define FS_REG_IME            FS_REG16(0x04000208)",
 )
@@ -79,9 +78,8 @@ replace_function(
     r'''static void fullscreen_upload_frame(void)
 {
     /* The logical frame uses the native 240-byte Mode 4 stride.  Only the first
-       160 bytes of each row are composed; the affine unit never samples the
-       unused 80-byte tail.  One contiguous DMA is substantially cheaper than
-       starting 144 independent row transfers. */
+       160 bytes of each row are composed; the affine unit does not sample the
+       unused 80-byte tail.  Upload the complete buffer with one DMA3 transfer. */
     dmaCopy(fullscreen_frame, (void *)FS_MODE4_PAGE0, FS_FRAME_SIZE);
 }''',
 )
@@ -90,10 +88,6 @@ replace_function(
     "static void fullscreen_enter(void)",
     r'''static void fullscreen_enter(void)
 {
-    u16 previous_ime = FS_REG_IME;
-
-    FS_REG_IME = 0;
-
     fullscreen_save_bg_palette();
     fullscreen_window_line = 0;
     fullscreen_render_phase = 0;
@@ -101,20 +95,15 @@ replace_function(
     fullscreen_frame_ready = 0;
     fullscreen_visible = 0;
 
-    /* Preserve the stock display timing state.  Fullscreen does not use the
-       Mode 0 HBlank/VCount renderer, but audio DMA1/DMA2 must remain untouched. */
+    /* Capture the stock display state.  It is restored before every original
+       VBlank and captured again afterwards.  DMA1/DMA2 are audio channels and
+       are never touched by fullscreen code. */
     fullscreen_saved_ie = FS_REG_IE;
     fullscreen_saved_dispstat = FS_REG_DISPSTAT;
     fullscreen_saved_dma0cnt_h = FS_REG_DMA0CNT_H;
 
-    FS_REG_DMA0CNT_H = 0;
-    FS_REG_IE &= (u16)~(FS_IRQ_HBLANK | FS_IRQ_VCOUNT);
-    FS_REG_DISPSTAT &= (u16)~(FS_DISPSTAT_HBLANK | FS_DISPSTAT_VCOUNT);
-
     fullscreen_active = 1;
     _scanlinehook = default_scanlinehook;
-
-    FS_REG_IME = previous_ime;
 }''',
 )
 
@@ -137,12 +126,37 @@ replace_function(
     fullscreen_restore_bg_palette();
     FS_REG_DISPCNT = 0;
 
-    /* Restore exactly the display IRQ and DMA0 state present before entering
-       fullscreen.  Sound DMA1/DMA2 were never stopped. */
     FS_REG_DMA0CNT_H = fullscreen_saved_dma0cnt_h;
     FS_REG_DISPSTAT = fullscreen_saved_dispstat;
     FS_REG_IE = fullscreen_saved_ie;
 
+    FS_REG_IME = previous_ime;
+}''',
+)
+
+replace_function(
+    "void fullscreen_vblank_pre(void)",
+    r'''void fullscreen_vblank_pre(void)
+{
+    u16 previous_ime;
+
+    if (fullscreen_active && !fullscreen_wanted()) {
+        fullscreen_exit();
+        return;
+    }
+
+    if (!fullscreen_active) {
+        return;
+    }
+
+    /* The complete stock VBlank path must run every frame.  Restore its last
+       DMA0/IRQ state immediately before calling it; V9 skipped this path and
+       gameplay/input stopped progressing. */
+    previous_ime = FS_REG_IME;
+    FS_REG_IME = 0;
+    FS_REG_DMA0CNT_H = fullscreen_saved_dma0cnt_h;
+    FS_REG_DISPSTAT = fullscreen_saved_dispstat;
+    FS_REG_IE = fullscreen_saved_ie;
     FS_REG_IME = previous_ime;
 }''',
 )
@@ -163,6 +177,17 @@ replace_function(
 
     previous_ime = FS_REG_IME;
     FS_REG_IME = 0;
+
+    /* Preserve the display state produced by the original VBlank so it can be
+       restored before the next one.  Disable only display-specific DMA0 and
+       HBlank/VCount during the visible bitmap frame. */
+    fullscreen_saved_dma0cnt_h = FS_REG_DMA0CNT_H;
+    fullscreen_saved_dispstat = FS_REG_DISPSTAT;
+    fullscreen_saved_ie = FS_REG_IE;
+
+    FS_REG_DMA0CNT_H = 0;
+    FS_REG_IE &= (u16)~(FS_IRQ_HBLANK | FS_IRQ_VCOUNT);
+    FS_REG_DISPSTAT &= (u16)~(FS_DISPSTAT_HBLANK | FS_DISPSTAT_VCOUNT);
 
     if (fullscreen_frame_ready) {
         fullscreen_upload_frame();
@@ -185,8 +210,6 @@ replace_function(
         FS_REG_BG2X = 0;
         FS_REG_BG2Y = 0;
 
-        /* Page 0 is visible from 0x06000000 through 0x060095FF.  The original
-           time-critical .vram1 block remains untouched at 0x0600F000. */
         FS_REG_DISPCNT = FS_DISPCNT_MODE4 | FS_DISPCNT_PAGE1 | FS_DISPCNT_BG2;
     }
 
@@ -195,4 +218,4 @@ replace_function(
 )
 
 source.write_text(text, encoding="utf-8")
-print("Patched fullscreen.c for page-0 fast path and preserved audio DMA")
+print("Patched fullscreen.c for conservative page-0 VBlank coexistence")
