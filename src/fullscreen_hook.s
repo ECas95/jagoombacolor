@@ -15,9 +15,16 @@ vblankinterrupt:
 	@ Preserve the complete interrupted context.  The original handler uses the
 	@ emulator's register conventions and the fullscreen helpers are Thumb C.
 	stmfd sp!,{r0-r12,lr}
+
+	@ The stock renderer rewrites ui_border_visible every frame.  Re-apply the
+	@ dedicated gameplay/menu gate before both fullscreen decisions so the
+	@ backend cannot be disabled again by normal border bookkeeping.
+	blx_long fullscreen_gate_refresh
 	blx_long fullscreen_vblank_pre
 	bl fullscreen_original_vblankinterrupt
+	blx_long fullscreen_gate_refresh
 	blx_long fullscreen_vblank_post
+
 	ldmfd sp!,{r0-r12,pc}
 
 	global_func fullscreen_scanline_hook
