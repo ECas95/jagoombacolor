@@ -1,7 +1,7 @@
 %rename link                old_link
 
 *link:
-%(old_link) -T ../src/gba_cart_my.ld%s
+%(old_link) -T ../src/gba_cart_fullscreen.ld%s
 
 *startfile:
 gba_crt0_my%O%s crti%O%s crtbegin%O%s
