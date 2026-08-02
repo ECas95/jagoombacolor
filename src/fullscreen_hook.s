@@ -15,22 +15,11 @@ vblankinterrupt:
 	@ IRQ stack 8-byte aligned while the wrapper calls Thumb C helpers.
 	stmfd sp!,{r0-r12,lr}
 
+	@ Restore the stock display IRQ/DMA0 state before running Jagoomba's complete
+	@ VBlank path.  Skipping this path in V9 stopped gameplay/input progression.
 	blx_long fullscreen_gate_refresh
 	blx_long fullscreen_vblank_pre
-
-	@ Once fullscreen is active, do not run the complete Mode 0 renderer a second
-	@ time.  The emulator only needs the VBlank completion flag here; the bitmap
-	@ compositor and presentation run through the fullscreen hooks below.
-	ldr r0,=fullscreen_active
-	ldrb r0,[r0]
-	cmp r0,#0
-	beq 1f
-	mov r0,#1
-	strb_ r0,vblank_happened
-	b 2f
-1:
 	bl fullscreen_original_vblankinterrupt
-2:
 	blx_long fullscreen_gate_refresh
 	blx_long fullscreen_vblank_post
 
