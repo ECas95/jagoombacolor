@@ -1,8 +1,9 @@
 @ Fullscreen renderer interworking hooks.
 @
-@ This file is included by all.s after lcd.s.  lcd.s is preprocessed with
-@ vblankinterrupt renamed to fullscreen_original_vblankinterrupt, leaving the
-@ public vblankinterrupt symbol available for the wrapper below.
+@ lcd.s is preprocessed with vblankinterrupt and newframe_vblank renamed to
+@ private originals.  timeout.s still calls the public newframe_vblank wrapper
+@ below, giving the fullscreen compositor one deterministic call per emulated
+@ Game Boy frame.
 
 	.text
 	.align
@@ -12,13 +13,10 @@
 
 	global_func vblankinterrupt
 vblankinterrupt:
-	@ Preserve the complete interrupted context.  The original handler uses the
+	@ Preserve the complete interrupted context. The original handler uses the
 	@ emulator's register conventions and the fullscreen helpers are Thumb C.
 	stmfd sp!,{r0-r12,lr}
 
-	@ The stock renderer rewrites ui_border_visible every frame.  Re-apply the
-	@ dedicated gameplay/menu gate before both fullscreen decisions so the
-	@ backend cannot be disabled again by normal border bookkeeping.
 	blx_long fullscreen_gate_refresh
 	blx_long fullscreen_vblank_pre
 	bl fullscreen_original_vblankinterrupt
@@ -27,14 +25,22 @@ vblankinterrupt:
 
 	ldmfd sp!,{r0-r12,pc}
 
+	global_func newframe_vblank
+newframe_vblank:
+	@ Preserve the return address expected by timeout.s, run the stock emulated
+	@ frame-boundary work, then compose a complete 160x144 frame in one pass.
+	stmfd sp!,{lr}
+	bl fullscreen_original_newframe_vblank
+	stmfd sp!,{r0-r12,lr}
+	blx_long fullscreen_compose_frame_now
+	ldmfd sp!,{r0-r12,lr}
+	ldmfd sp!,{pc}
+
 	global_func fullscreen_scanline_hook
 fullscreen_scanline_hook:
-	@ The GB CPU core keeps emulated state in ARM registers, so preserve every
-	@ register around the C line compositor, then continue through the stock
-	@ timing/IRQ/HDMA scanline handler.
-	stmfd sp!,{r0-r12,lr}
-	blx_long fullscreen_scanline_render
-	ldmfd sp!,{r0-r12,lr}
+	@ V5 no longer composes through the scanline pointer. Keep this hook timing-
+	@ transparent because fullscreen_vblank_post may still install it while the
+	@ backend is active.
 	b default_scanlinehook
 
 	.align
