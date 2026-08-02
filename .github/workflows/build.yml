@@ -47,22 +47,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          READELF="$DEVKITARM/bin/arm-none-eabi-readelf"
           NM="$DEVKITARM/bin/arm-none-eabi-nm"
           OBJDUMP="$DEVKITARM/bin/arm-none-eabi-objdump"
 
-          section_addr="$($READELF -W -S jagoombacolor.elf | awk '$3 == ".vram1" {print $5}')"
-          test "$section_addr" = "0203f000"
+          "$OBJDUMP" -h jagoombacolor.elf > section-map.txt
+          "$NM" -n jagoombacolor.elf > symbols.txt
 
-          frame_addr="$($NM -n jagoombacolor.elf | awk '$3 == "fullscreen_frame" {print $1}')"
-          test -n "$frame_addr"
-
-          $OBJDUMP -h jagoombacolor.elf > section-map.txt
           python3 - <<'PY'
           from pathlib import Path
 
           lines = Path("section-map.txt").read_text(encoding="utf-8").splitlines()
-          sections = []
+          sections = {}
           for index, line in enumerate(lines):
               fields = line.split()
               if len(fields) < 7 or not fields[0].isdigit():
@@ -70,19 +65,74 @@ jobs:
               name = fields[1]
               size = int(fields[2], 16)
               vma = int(fields[3], 16)
-              flags = lines[index + 1] if index + 1 < len(lines) else ""
-              if "CODE" in flags:
-                  sections.append((name, vma, size))
+              flags = lines[index + 1].strip() if index + 1 < len(lines) else ""
+              sections[name] = {"vma": vma, "size": size, "flags": flags}
+
+          if ".vram1" not in sections:
+              raise SystemExit("Missing .vram1 section")
+
+          relocated = sections[".vram1"]
+          if relocated["vma"] != 0x0203F000:
+              raise SystemExit(
+                  f".vram1 has unexpected VMA 0x{relocated['vma']:08X}"
+              )
+          if "CODE" not in relocated["flags"]:
+              raise SystemExit(".vram1 is not marked executable")
+          if relocated["size"] > 0x1000:
+              raise SystemExit(
+                  f".vram1 exceeds reserved EWRAM block: 0x{relocated['size']:X}"
+              )
 
           framebuffer_start = 0x0600A000
           framebuffer_end = 0x06014000
-          overlaps = [
-              (name, address, size)
-              for name, address, size in sections
-              if address < framebuffer_end and address + size > framebuffer_start
-          ]
+          overlaps = []
+          for name, section in sections.items():
+              if "CODE" not in section["flags"]:
+                  continue
+              start = section["vma"]
+              end = start + section["size"]
+              if start < framebuffer_end and end > framebuffer_start:
+                  overlaps.append((name, start, section["size"]))
+
           if overlaps:
-              raise SystemExit(f"Executable code overlaps Mode 4 page 1: {overlaps}")
+              formatted = ", ".join(
+                  f"{name}@0x{start:08X}+0x{size:X}"
+                  for name, start, size in overlaps
+              )
+              raise SystemExit(
+                  "Executable code overlaps Mode 4 page 1: " + formatted
+              )
+
+          symbols = {}
+          for line in Path("symbols.txt").read_text(encoding="utf-8").splitlines():
+              fields = line.split()
+              if len(fields) >= 3:
+                  try:
+                      address = int(fields[0], 16)
+                  except ValueError:
+                      continue
+                  symbols[fields[-1]] = address
+
+          required = (
+              "fullscreen_frame",
+              "newframe_vblank",
+              "fullscreen_original_newframe_vblank",
+          )
+          missing = [name for name in required if name not in symbols]
+          if missing:
+              raise SystemExit("Missing required symbols: " + ", ".join(missing))
+
+          frame = symbols["fullscreen_frame"]
+          if not (0x02000000 <= frame < 0x0203F000):
+              raise SystemExit(
+                  f"fullscreen_frame outside normal EWRAM: 0x{frame:08X}"
+              )
+
+          print(
+              f".vram1 relocated to 0x{relocated['vma']:08X}, "
+              f"size 0x{relocated['size']:X}"
+          )
+          print(f"fullscreen_frame at 0x{frame:08X}")
           print("No executable section overlaps Mode 4 page 1.")
           PY
 
@@ -90,7 +140,7 @@ jobs:
         run: |
           ls -l jagoombacolor.gba jagoombacolor.elf
           sha256sum jagoombacolor.gba
-          "$DEVKITARM/bin/arm-none-eabi-readelf" -W -S jagoombacolor.elf | grep -E '\.vram1|\.sbss|\.ewram'
+          cat section-map.txt
           "$DEVKITARM/bin/arm-none-eabi-nm" -n jagoombacolor.elf | grep -E 'fullscreen_frame|newframe_vblank|fullscreen_original_newframe_vblank'
 
       - name: Upload emulator binary
@@ -103,4 +153,5 @@ jobs:
             jagoombacolor.elf.map
             src/gba_cart_fullscreen.ld
             section-map.txt
+            symbols.txt
           if-no-files-found: error
