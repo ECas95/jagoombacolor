@@ -3,11 +3,9 @@
 /*
  * Deterministic full-frame entry point.
  *
- * The first fullscreen prototypes depended on _scanlinehook receiving every
- * emulated LCD line.  On the current Jagoomba timing path that did not yield a
- * complete frame before the stock renderer regained control.  This function is
- * called from the public newframe_vblank wrapper once per emulated GB frame and
- * invokes the existing compositor for all 144 visible lines directly.
+ * The fullscreen compositor is intentionally decoupled from the per-scanline
+ * hook.  It runs after Jagoomba's original frame-boundary bookkeeping and
+ * rebuilds the 160x144 logical frame from emulated GB/GBC VRAM and OAM.
  */
 
 extern volatile u8 g_scanline;
@@ -32,12 +30,12 @@ void fullscreen_compose_frame_now(void)
         return;
     }
 
-    /* Compose at 30 fps. GB/GBC timing and input still run at the original rate;
-       only the software-generated fullscreen image is refreshed every second
-       emulated frame. This keeps the first validation build within the ARM7
-       budget while preserving a deterministic rendering path. */
-    fullscreen_compose_phase ^= 1;
-    if (!fullscreen_compose_phase) {
+    /* V10 prioritises playable emulation over display refresh.  Rebuilding the
+       complete frame in C is currently the dominant CPU cost, so compose once
+       every four emulated frames (about 15 fps) while the emulator, input and
+       audio continue at their original timing. */
+    fullscreen_compose_phase = (u8)((fullscreen_compose_phase + 1) & 3);
+    if (fullscreen_compose_phase != 1) {
         return;
     }
 
@@ -53,9 +51,5 @@ void fullscreen_compose_frame_now(void)
     }
 
     g_scanline = saved_scanline;
-
-    /* fullscreen_scanline_render marks the frame ready on line 143. Keep this
-       assignment explicit so a future compositor refactor cannot silently stop
-       presentation at the hardware VBlank boundary. */
     fullscreen_frame_ready = 1;
 }
